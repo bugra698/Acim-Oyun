@@ -3,7 +3,7 @@ from ursina.prefabs.first_person_controller import FirstPersonController
 from ursina.shaders import lit_with_shadows_shader
 from ursina.shader import Shader as UrsinaShader
 from panda3d.core import BitMask32, TextureStage, Vec4, Mat4, Texture, Shader, Vec2
-import random, math
+import random, math, time as _time
 
 app = Ursina()
 
@@ -366,7 +366,7 @@ def update_raytrace_uniforms():
         else:
             src_w, src_h = int(window.size[0]), int(window.size[1])
         rt_quad.setShaderInput('resolution', Vec2(max(1, src_w), max(1, src_h)))
-        rt_quad.setShaderInput('framePhase', float(time.time()))
+        rt_quad.setShaderInput('framePhase', float(_time.monotonic()))
     except Exception as matrix_error:
         # Do not stop gameplay if a driver rejects a shader uniform update.
         pass
@@ -519,7 +519,7 @@ def update_warm_light_uniforms():
             except ValueError: pass
     # Select nearby lamps first so the fixed GPU light budget follows the active area.
     alive.sort(key=lambda item: item[0])
-    now = time.time()
+    now = _time.monotonic()
     for i in range(MAX_WARM_LIGHTS):
         if i < len(alive):
             _d2, source, pos = alive[i]
@@ -559,7 +559,7 @@ sun.color = color.rgb32(105, 122, 190)  # soğuk ay ışığı
 sun.look_at(Vec3(-0.8, -2.0, -0.5))
 # Gölge kamerasının sınırları yalnızca boş sahneye göre hesaplanırsa gölgeler kaybolur.
 # Bu görünmez hacim üç bölümün tamamını kapsayan kararlı bir gölge alanı tanımlar.
-shadow_bounds = Entity(model='cube', position=(0, 7, 16), scale=(36, 22, 64),
+shadow_bounds = Entity(model='cube', position=(0, 6, 8), scale=(42, 20, 78),
                        color=color.rgba32(0, 0, 0, 0), visible=False, collider=None)
 try:
     sun._light.setShadowCaster(True, 2048, 2048)
@@ -806,6 +806,13 @@ class HUD(Entity):
         self.inv = Text('', parent=self,
                         position=(-0.845,0.390), scale=1.15,
                         color=color.rgb32(255,215,80), line_height=1.6)
+        # Şato bulmacasında bulunan sayı kâğıtları ekranda köşede tutulur.
+        self.code_note_bg = Entity(parent=self, model='quad', scale=(0.37,0.19),
+                                   position=(0.655,0.355), color=color.rgba32(5,8,16,205),
+                                   enabled=False)
+        self.code_note = Text('', parent=self, position=(0.49,0.435),
+                              scale=0.82, origin=(-0.5,0.5),
+                              color=color.rgb32(245,220,150), enabled=False)
         # Ortadaki ipucu
         self.hint = Text('', parent=self, origin=(0,0),
                          position=(0,-0.42), scale=1.55,
@@ -873,7 +880,7 @@ class HUD(Entity):
         self.hp_bar.x = -0.755 - (0.21-r)/2
         ri = int(200*(1-g.hp/100)); gi = int(200*(g.hp/100))
         self.hp_bar.color = color.rgb32(ri,gi,20)
-        self.ch_txt.text = f'Bölüm {g.chapter} / 3'
+        self.ch_txt.text = f'Bölüm {g.chapter} / 4'
         inv = []
         if g.has_sword: inv.append('Kılıç')
         if g.has_key:   inv.append('Anahtar')
@@ -955,7 +962,18 @@ class Chapter1(Entity):
         # Dünya modellerinde gölge alabilen ışıklandırma shader'ı.
         if kw.get('model') != 'sphere' or kw.get('scale') != 500:
             kw.setdefault('shader', torch_lighting_shader)
-        e=Entity(*a,**kw); self.ents.append(e); return e
+        e=Entity(*a,**kw); self.ents.append(e)
+        try:
+            sc=e.scale
+            dims=(abs(float(sc.x)),abs(float(sc.y)),abs(float(sc.z)))
+            # Uzakta pahalı olmayan, küçük dekoratif ayrıntılar LOD ile render dışına alınabilir.
+            # Collider taşıyan duvar/zemin/mobilya ve çok büyük gök kubbeleri korunur.
+            e._kk_lod_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 3.6 and max(dims) > 0.015)
+            e._kk_occlusion_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 12.0 and max(dims) > 0.015)
+        except Exception:
+            e._kk_lod_candidate=False
+            e._kk_occlusion_candidate=False
+        return e
 
     def _make_torch(self, x, z, base_y=0.0, pole_h=1.15):
         pole = self._mk(model=cyl(), scale=(0.09, pole_h, 0.09),
@@ -1001,6 +1019,18 @@ class Chapter1(Entity):
                          position=(gx*2, -0.1, gz*2),
                          scale=(2.02, 0.2, 2.02), color=c_, shader=None if reflection_enabled else torch_lighting_shader)
                 register_reflection_surface(floor_tile)
+
+        # BÖLÜM 1 SINIRLARI: oyuncunun harita dışına yürüyerek çıkmasını önleyen
+        # koyu taş/kök karışımı çevre duvarları. Kuzey kapısı duvarın içinde kalır.
+        boundary_color = color.rgb32(27, 36, 28)
+        for wall_pos, wall_scale in [
+            ((-17.1, 3.8, 0), (0.65, 7.6, 34.2)),
+            (( 17.1, 3.8, 0), (0.65, 7.6, 34.2)),
+            ((0, 3.8, -17.1), (34.2, 7.6, 0.65)),
+            ((0, 3.8,  17.1), (34.2, 7.6, 0.65)),
+        ]:
+            self._mk(model='cube', position=wall_pos, scale=wall_scale,
+                     color=boundary_color, collider='box')
 
         # Alçak, seyrek orman sisi. Sis yere yakın tutulur.
         add_low_mist(self, [(-8, -1, 5.5), (6, 2, 6.0), (-3, 8, 4.5),
@@ -1094,10 +1124,12 @@ class Chapter1(Entity):
         self.elapsed += time.dt
         for flame, inner, light, base_y, phase in self.torch_flames:
             pulse = math.sin(self.elapsed * 9.0 + phase)
-            flame.y = base_y + pulse * 0.035
+            flame.y = base_y + pulse * 0.045
             inner.y = flame.y + 0.06
-            flame.scale = 0.27 + 0.025 * (0.5 + 0.5 * pulse)
-            light['intensity'] = 1.45 + 0.45 * (0.5 + 0.5 * pulse)
+            flame.scale = (0.24 + 0.025 * pulse, 0.34 + 0.06 * pulse, 0.24 + 0.025 * pulse)
+            flame.rotation_z = math.sin(self.elapsed * 6.0 + phase) * 9.0
+            inner.scale_y = 0.12 + 0.025 * math.sin(self.elapsed * 12.0 + phase)
+            light['intensity'] = 1.35 + 0.60 * (0.5 + 0.5 * pulse)
         # Altyazı açıkken dünya güncellenmeye devam eder; yalnız etkileşimler kilitlenir.
         if not g.dlg_open and not g.has_sword:
             if distance_xz(player.position,self.sword.position)<2.2:
@@ -1125,9 +1157,376 @@ class Chapter1(Entity):
         scene.fog_density=0
 
 # ─────────────────────────────────────────────────────────────
-#  BÖLÜM 2 – KALE
+#  BÖLÜM 2 – ŞİFRELİ ŞATO / KEŞİF BULMACASI
 # ─────────────────────────────────────────────────────────────
 class Chapter2(Entity):
+    """Ormandan sonraki şato. Dört odadaki çekmeceler dört haneli kodu verir."""
+    PASSWORD = '4719'
+
+    def __init__(self):
+        super().__init__()
+        self.ents = []
+        self.drawers = []
+        self.torch_flames = []
+        self.found_digits = {}
+        self.code_mode = False
+        self.typed_code = ''
+        self.door_opening = False
+        self.elapsed = 0.0
+        self.atmosphere_fog_color = color.rgb32(15, 15, 28)
+        self.atmosphere_fog_density = 0.018
+        self._build()
+        self._update_note()
+        hud.code_note.enabled = True
+        hud.code_note_bg.enabled = True
+        invoke(lambda: dlg.show(
+            "Ormandaki kapının ardında eski bir şato buldun.\n\n"
+            "Boss'a giden ana kapı dört haneli bir şifreyle kilitli.\n"
+            "Dört odadaki çekmeceleri E ile aç ve içlerindeki sayı kâğıtlarını bul.\n"
+            "Bulduğun sayılar ekranın sağ üst köşesinde sırayla not edilecek.\n\n"
+            "Dört sayıyı da bulunca ana kapının yanındaki panele git.",
+            'Bölüm 2 – Şifreli Şato'), delay=0.7)
+
+    def _mk(self, *a, **kw):
+        if kw.get('model') != 'sphere' or kw.get('scale') != 500:
+            kw.setdefault('shader', torch_lighting_shader)
+        e = Entity(*a, **kw)
+        self.ents.append(e)
+        try:
+            sc=e.scale
+            dims=(abs(float(sc.x)),abs(float(sc.y)),abs(float(sc.z)))
+            e._kk_lod_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 3.6 and max(dims) > 0.015)
+            e._kk_occlusion_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 12.0 and max(dims) > 0.015)
+        except Exception:
+            e._kk_lod_candidate=False
+            e._kk_occlusion_candidate=False
+        return e
+
+    def _wall(self, pos, scale):
+        return self._mk(model='cube', position=pos, scale=scale,
+                        color=color.rgb32(58, 49, 53), collider='box')
+
+    def _build_room_furniture(self, room_name, x, z, digit, slot):
+        # Oda zemini ve halı; odalar açık kapı boşluklarıyla merkez koridora bağlanır.
+        carpet = self._mk(model='cube', position=(x, 0.015, z),
+                          scale=(7.2, 0.04, 6.0),
+                          color=color.rgb32(62, 25, 36), collider=None)
+        # Yatak: ahşap iskelet, koyu yatak ve yastık.
+        self._mk(model='cube', position=(x + 1.35, 0.38, z + 1.45),
+                 scale=(2.0, 0.42, 3.0), color=color.rgb32(76, 43, 29), collider='box')
+        self._mk(model='cube', position=(x + 1.35, 0.64, z + 1.45),
+                 scale=(1.82, 0.16, 2.78), color=color.rgb32(71, 42, 66), collider=None)
+        self._mk(model='cube', position=(x + 1.35, 0.76, z + 2.42),
+                 scale=(1.35, 0.14, 0.53), color=color.rgb32(210, 197, 180), collider=None)
+        # Dolap, kapak çizgileri ve kulplar.
+        self._mk(model='cube', position=(x - 2.0, 1.22, z + 1.7),
+                 scale=(1.3, 2.45, 0.85), color=color.rgb32(70, 43, 27), collider='box')
+        for dx in (-0.32, 0.32):
+            self._mk(model='cube', position=(x - 2.0 + dx, 1.24, z + 1.235),
+                     scale=(0.035, 2.15, 0.045), color=color.rgb32(135, 93, 45), collider=None)
+            self._mk(model='sphere', position=(x - 2.0 + dx, 1.22, z + 1.16),
+                     scale=0.09, color=color.rgb32(205, 165, 75), unlit=True, shader=None, collider=None)
+        # Komodin ve şamdan.
+        self._mk(model='cube', position=(x + 2.45, 0.48, z - 0.35),
+                 scale=(0.9, 0.9, 0.8), color=color.rgb32(83, 51, 31), collider='box')
+        self._mk(model=cyl(), position=(x + 2.45, 1.12, z - 0.35),
+                 scale=(0.08, 0.45, 0.08), color=color.rgb32(170, 130, 65), collider=None)
+        flame = self._mk(model='sphere', position=(x + 2.45, 1.42, z - 0.35),
+                         scale=(0.105, 0.26, 0.105), color=color.rgb32(255, 118, 26),
+                         unlit=True, shader=None, collider=None)
+        inner_flame = self._mk(model='sphere', position=(x + 2.45, 1.45, z - 0.35),
+                                scale=(0.055, 0.16, 0.055), color=color.rgb32(255, 220, 120),
+                                unlit=True, shader=None, collider=None)
+        mark_glow(flame)
+        warm_source = register_warm_light_at(self, (x + 2.45, 1.5, z - 0.35),
+                                             tint=(1.0, 0.45, 0.12), radius=5.5, intensity=0.85)
+        self.torch_flames.append((flame, inner_flame, warm_source, 1.42, random.uniform(0, math.tau)))
+        # Çekmeceli şifonyer. Ön yüz ayrı Entity olduğundan açıldığında dışarı kayar.
+        cabinet_x = x - 0.25
+        cabinet_z = z - 1.75
+        self._mk(model='cube', position=(cabinet_x, 0.58, cabinet_z),
+                 scale=(1.65, 1.12, 0.88), color=color.rgb32(88, 52, 30), collider='box')
+        # Her odada tek, gerçekten etkileşilebilir bir çekmece bulunur.
+        # Böylece görünen hiçbir çekmece sahte kalmaz: E ile açılınca kâğıt çıkar.
+        drawer_y = 0.58
+        front = self._mk(model='cube',
+                         position=(cabinet_x, drawer_y, cabinet_z - 0.48),
+                         scale=(1.42, 0.62, 0.10),
+                         color=color.rgb32(120, 76, 42), collider=None)
+        handle = self._mk(model='sphere',
+                          position=(cabinet_x, drawer_y, cabinet_z - 0.55),
+                          scale=(0.10, 0.07, 0.06),
+                          color=color.rgb32(220, 181, 91), unlit=True, shader=None, collider=None)
+        self.drawers.append({
+            'room': room_name, 'slot': slot, 'digit': str(digit),
+            'position': Vec3(cabinet_x, 0.5, cabinet_z - 1.05),
+            'front': front, 'handle': handle, 'opened': False,
+            'paper': None, 'note': None
+        })
+        # Odanın adı, duvarda küçük bir levha olarak bulunur.
+        plaque = self._mk(model='cube', position=(x, 2.35, z - 2.78),
+                          scale=(2.35, 0.42, 0.08), color=color.rgb32(100, 70, 42), collider=None)
+        Text(room_name.upper(), parent=plaque, scale=4.5, origin=(0, 0),
+             color=color.rgb32(245, 205, 125), z=-2)
+
+    def _build(self):
+        self._mk(model='sphere', scale=500, color=color.rgb32(3, 4, 13),
+                 double_sided=True, unlit=True, shader=None, collider=None)
+        scene.fog_color = self.atmosphere_fog_color
+        scene.fog_density = self.atmosphere_fog_density
+        add_night_sky(self, include_moon=False, star_count=35)
+        # Zemin
+        for gx in range(-8, 9):
+            for gz in range(-7, 8):
+                tile = self._mk(model='cube', position=(gx * 2, -0.12, gz * 2),
+                                scale=(2.02, 0.24, 2.02),
+                                color=color.rgb32(58 + random.randint(0, 8),
+                                                  51 + random.randint(0, 7),
+                                                  55 + random.randint(0, 8)),
+                                collider='box')
+                register_reflection_surface(tile)
+        # Dış duvarlar. Kuzeyde ortada ana kapı boşluğu, güneyde şatoya giriş boşluğu.
+        self._wall((-15.4, 3.5, 0), (0.8, 7, 29))
+        self._wall((15.4, 3.5, 0), (0.8, 7, 29))
+        self._wall((-8.25, 3.5, 14.4), (13.5, 7, 0.8))
+        self._wall((8.25, 3.5, 14.4), (13.5, 7, 0.8))
+        self._wall((-8.25, 3.5, -14.4), (13.5, 7, 0.8))
+        self._wall((8.25, 3.5, -14.4), (13.5, 7, 0.8))
+        # Dört gerçek oda: bölme duvarları birbirine bağlanır; her oda için
+        # yaklaşık 2-3 birimlik geçiş boşluğu bırakılır. Merkezde küçük bir kesişim vardır.
+        for x, width in [(-12.0, 6.0), (-4.0, 6.0), (4.0, 6.0), (12.0, 6.0)]:
+            self._wall((x, 3.25, 0), (width, 6.5, 0.45))
+        for z, length in [(-11.5, 5.0), (-3.5, 5.0), (3.5, 5.0), (11.5, 5.0)]:
+            self._wall((0, 3.25, z), (0.45, 6.5, length))
+
+        # Kapalı taş tavan. Kirişler tavanı daha inandırıcı gösterir ve dışarı düşmeyi önler.
+        self._wall((0, 7.15, 0), (31.5, 0.75, 29.7))
+        for bx in (-10.0, -5.0, 0.0, 5.0, 10.0):
+            self._wall((bx, 6.68, 0), (0.28, 0.22, 28.5))
+        for bz in (-9.0, -3.0, 3.0, 9.0):
+            self._wall((0, 6.68, bz), (30.5, 0.22, 0.28))
+        # Ana kapı, tuş paneli ve çerçeve.
+        for sx in (-1.65,  1.65):
+            self._mk(model='cube', position=(sx, 2.35, 14.0), scale=(0.32, 4.7, 0.6),
+                     color=color.rgb32(65, 37, 23), collider='box')
+        self._mk(model='cube', position=(0, 4.75, 14.0), scale=(3.55, 0.32, 0.6),
+                 color=color.rgb32(65, 37, 23), collider='box')
+        self.exit_door = self._mk(model='cube', position=(0, 2.25, 14.15),
+                                  scale=(2.75, 4.3, 0.28), color=color.rgb32(83, 43, 24),
+                                  collider='box')
+        for i in range(5):
+            self._mk(model='cube', position=(-1.0 + i * 0.5, 2.2, 13.98),
+                     scale=(0.045, 3.85, 0.06), color=color.rgb32(110, 64, 35), collider=None)
+        self._mk(model='cube', position=(0, 3.4, 13.82), scale=(0.42, 0.42, 0.1),
+                 color=color.rgb32(205, 161, 63), collider=None)
+        # Animasyonlu duvar meşaleleri: iki kat alev, emissive parıltı ve dinamik ışık.
+        for tx, tz in [(-13, 0), (13, 0), (-4, 11), (4, 11), (-4, -11), (4, -11)]:
+            self._mk(model='cylinder', position=(tx, 2.1, tz), scale=(0.10, 1.4, 0.10),
+                     color=color.rgb32(70, 45, 27), collider=None)
+            fire = self._mk(model='sphere', position=(tx, 2.9, tz), scale=(0.17, 0.38, 0.17),
+                            color=color.rgb32(255, 112, 24), unlit=True, shader=None, collider=None)
+            inner = self._mk(model='sphere', position=(tx, 2.92, tz), scale=(0.085, 0.24, 0.085),
+                             color=color.rgb32(255, 221, 120), unlit=True, shader=None, collider=None)
+            mark_glow(fire)
+            light_src = register_warm_light_at(self, (tx, 2.9, tz), tint=(1.0, 0.4, 0.12), radius=8.0, intensity=1.25)
+            self.torch_flames.append((fire, inner, light_src, 2.9, random.uniform(0, math.tau)))
+        self._build_room_furniture('KUZEYBATI ODASI', -8.2, 7.5, 4, 1)
+        self._build_room_furniture('KUZEYDOĞU ODASI', 8.2, 7.5, 7, 2)
+        self._build_room_furniture('GÜNEYBATI ODASI', -8.2, -7.5, 1, 3)
+        self._build_room_furniture('GÜNEYDOĞU ODASI', 8.2, -7.5, 9, 4)
+        # Kapı yanındaki küçük kod paneli.
+        panel = self._mk(model='cube', position=(2.15, 1.65, 13.65), scale=(0.28, 0.72, 0.15),
+                         color=color.rgb32(36, 43, 51), collider=None)
+        for i in range(4):
+            self._mk(model='cube', position=(2.15, 1.86 - i * 0.14, 13.54),
+                     scale=(0.12, 0.07, 0.035), color=color.rgb32(65, 195, 170),
+                     unlit=True, shader=None, collider=None)
+        register_warm_light_at(self, (2.15, 1.7, 13.4), tint=(0.10, 0.75, 0.55), radius=4.0, intensity=0.6)
+        # Ekran üstü şifre paneli. Dünya culling listesine eklenmez.
+        self.code_overlay = Entity(parent=camera.ui, enabled=False, z=-0.7)
+        Entity(parent=self.code_overlay, model='quad', scale=(0.80, 0.56),
+               color=color.rgba32(5, 9, 17, 245), z=0)
+        Entity(parent=self.code_overlay, model='quad', scale=(0.77, 0.52),
+               color=color.rgba32(20, 30, 45, 250), z=-0.01)
+        Entity(parent=self.code_overlay, model='quad', scale=(0.74, 0.012), y=0.20,
+               color=color.rgb32(70, 210, 185), z=-0.02)
+        self.code_title = Text('ŞATO ANA KAPISI', parent=self.code_overlay, y=0.14,
+                               origin=(0, 0), scale=1.4,
+                               color=color.rgb32(120, 245, 210), z=-0.03)
+        self.code_value_text = Text('____', parent=self.code_overlay, y=0.015,
+                                    origin=(0, 0), scale=2.2,
+                                    color=color.rgb32(255, 220, 145), z=-0.03)
+        self.code_help = Text('Rakamları yaz  |  ENTER: Onayla  |  BACKSPACE: Sil  |  ESC: Kapat',
+                              parent=self.code_overlay, y=-0.15, origin=(0, 0), scale=0.72,
+                              color=color.rgb32(190, 205, 220), z=-0.03)
+
+    def _update_note(self):
+        lines = ['ŞİFRE KÂĞITLARI']
+        for slot in range(1, 5):
+            digit = self.found_digits.get(slot, '_')
+            lines.append(f'{slot}. oda: {digit}')
+        hud.code_note.text = '\n'.join(lines)
+
+    def _refresh_code(self):
+        self.code_value_text.text = (self.typed_code + '_' * (4 - len(self.typed_code)))[:4]
+
+    def _nearest_drawer(self):
+        nearest = None
+        best = 999.0
+        for drawer in self.drawers:
+            if drawer['opened']:
+                continue
+            d = distance_xz(player.position, drawer['position'])
+            if d < best:
+                best = d
+                nearest = drawer
+        return nearest, best
+
+    def interact(self):
+        if self.code_mode or self.door_opening or g.dlg_open:
+            return
+        drawer, dist = self._nearest_drawer()
+        if drawer and dist < 2.5:
+            self._open_drawer(drawer)
+            return
+        if distance_xz(player.position, Vec3(0, 2, 13.6)) < 3.4:
+            if len(self.found_digits) < 4:
+                hud.set_hint(f'Şifre eksik: {4 - len(self.found_digits)} çekmece daha bulmalısın.')
+                hud.announce('Dört odadaki şifre kâğıtlarını bulmalısın.', 2.5)
+                return
+            self.code_mode = True
+            self.typed_code = ''
+            self._refresh_code()
+            self.code_overlay.enabled = True
+            player.speed = 0
+            player.jump_height = 0
+            mouse.locked = False
+            mouse.visible = True
+            hud.set_hint('')
+            return
+        if drawer and dist < 4.5:
+            hud.set_hint(f'[ E ] {drawer["room"]}: Çekmeceyi aç')
+        else:
+            hud.set_hint('[ E ] Yakındaki çekmeceyi veya ana kapıyı kullan')
+
+    def _open_drawer(self, drawer):
+        drawer['opened'] = True
+        front = drawer['front']
+        handle = drawer['handle']
+        front.animate_position(front.position + Vec3(0, 0, -0.34), duration=0.22)
+        handle.animate_position(handle.position + Vec3(0, 0, -0.34), duration=0.22)
+        digit = drawer['digit']
+        paper = self._mk(model='cube', position=(drawer['position'].x, 0.86, drawer['position'].z + 0.08),
+                         scale=(0.43, 0.025, 0.48), color=color.rgb32(235, 224, 190), collider=None)
+        drawer['paper'] = paper
+        # Bulunan şifre kâğıdı ve rakamı hiçbir zaman LOD tarafından atılmasın.
+        paper._kk_lod_candidate = False
+        paper._kk_occlusion_candidate = True
+        drawer['note'] = Text(f'{drawer["slot"]}: {digit}', parent=paper, scale=4.8,
+                              origin=(0, 0), color=color.rgb32(37, 28, 23), z=-2)
+        self.found_digits[drawer['slot']] = digit
+        self._update_note()
+        hud.refresh()
+        hud.announce(f'{drawer["room"].title()}: kâğıtta {digit} sayısı var.', 2.8)
+        hud.set_hint(f'Şifre kâğıdı bulundu: {drawer["slot"]}. sıradaki rakam {digit}')
+        if len(self.found_digits) == 4:
+            hud.announce('Dört kâğıt da bulundu! Kapının yanındaki panele git.', 4.0)
+
+    def handle_input(self, key):
+        if not self.code_mode:
+            return False
+        if key in ('escape',):
+            self.code_mode = False
+            self.code_overlay.enabled = False
+            player.speed = 6
+            player.jump_height = 2.4
+            mouse.locked = True
+            mouse.visible = False
+            return True
+        if key in ('backspace', 'delete'):
+            self.typed_code = self.typed_code[:-1]
+            self._refresh_code()
+            return True
+        if key in ('enter', 'numpad enter'):
+            if self.typed_code == self.PASSWORD and len(self.found_digits) == 4:
+                self.code_mode = False
+                self.door_opening = True
+                self.code_title.text = 'ŞİFRE DOĞRU'
+                self.code_value_text.text = 'KAPI AÇILIYOR'
+                self.code_help.text = 'Karanlık Şövalye seni bekliyor...'
+                self.exit_door.collider = None
+                self.exit_door.animate_rotation_y(95, duration=0.65)
+                invoke(self._leave_to_boss, delay=1.25)
+            else:
+                self.code_title.text = 'ŞİFRE YANLIŞ'
+                self.typed_code = ''
+                self._refresh_code()
+                invoke(lambda: setattr(self.code_title, 'text', 'ŞATO ANA KAPISI'), delay=1.2)
+            return True
+        if key in tuple(str(i) for i in range(10)) and len(self.typed_code) < 4:
+            self.typed_code += key
+            self._refresh_code()
+            return True
+        return True
+
+    def _leave_to_boss(self):
+        self.code_overlay.enabled = False
+        player.speed = 6
+        player.jump_height = 2.4
+        mouse.locked = True
+        mouse.visible = False
+        hud.code_note.enabled = False
+        hud.code_note_bg.enabled = False
+        load_chapter(3)
+
+    def update(self):
+        self.elapsed += time.dt
+        for flame, inner, light_source, base_y, phase in self.torch_flames:
+            pulse = math.sin(self.elapsed * 11.0 + phase)
+            flame.y = base_y + 0.035 * pulse
+            flame.scale = (0.17 + 0.018 * pulse, 0.36 + 0.045 * pulse, 0.17 + 0.018 * pulse)
+            flame.rotation_z = math.sin(self.elapsed * 7.5 + phase) * 8.0
+            inner.y = flame.y + 0.025
+            inner.scale_y = 0.22 + 0.025 * math.sin(self.elapsed * 13.0 + phase + 0.7)
+            try:
+                light_source['node'].position = flame.position
+                light_source['intensity'] = 0.95 + 0.36 * (0.5 + 0.5 * pulse)
+            except Exception:
+                pass
+        if self.code_mode or self.door_opening:
+            hud.set_hint('')
+            return
+        if g.dlg_open:
+            return
+        drawer, dist = self._nearest_drawer()
+        door_dist = distance_xz(player.position, Vec3(0, 2, 13.6))
+        if drawer and dist < 2.5:
+            hud.set_hint(f'[ E ] {drawer["room"].title()}: Çekmeceyi aç')
+        elif door_dist < 3.4:
+            if len(self.found_digits) < 4:
+                hud.set_hint(f'Ana kapı kilitli. {4-len(self.found_digits)} şifre kâğıdı eksik.')
+            else:
+                hud.set_hint('[ E ] Şifre panelini kullan')
+        else:
+            hud.set_hint('')
+
+    def clear(self):
+        hud.code_note.enabled = False
+        hud.code_note_bg.enabled = False
+        if getattr(self, 'code_overlay', None):
+            destroy(self.code_overlay)
+        for e in self.ents:
+            try:
+                destroy(e)
+            except Exception:
+                pass
+        scene.fog_density = 0
+
+
+# ─────────────────────────────────────────────────────────────
+#  BÖLÜM 3 – KALE BOSS ARENASI
+# ─────────────────────────────────────────────────────────────
+class Chapter3(Entity):
     def __init__(self):
         super().__init__()
         self.ents=[]; self.boss_alive=True
@@ -1139,19 +1538,30 @@ class Chapter2(Entity):
         self.state='idle'; self.timer=0.0; self.cool=0.0; self.enraged=False
         self._build()
         invoke(lambda: dlg.show(
-            "Kale içindesin. Soğuk ve karanlık.\n\n"
+            "Şifresi çözülmüş ana kapıdan geçip savaş salonuna ulaştın.\n\n"
             "Anahtarı bul, Karanlık Şövalye'yi yen,\n"
-            "kuzey kapısından çık!\n\n"
+            "çıkış kapısını aç ve lav parkuruna ilerle!\n\n"
             "Şövalye seni görünce üstüne gelir.\n"
             "Yakınındayken SOL TIK ile kılıcını salla.\n"
             "Darbesini hazırlarken geri çekilirsen kaçarsın!",
-            'Bölüm 2 – Karanlık Kale'), delay=0.6)
+            'Bölüm 3 – Karanlık Kale'), delay=0.6)
 
     def _mk(self,*a,**kw):
         # Dünya modellerinde gölge alabilen ışıklandırma shader'ı.
         if kw.get('model') != 'sphere' or kw.get('scale') != 500:
             kw.setdefault('shader', torch_lighting_shader)
-        e=Entity(*a,**kw); self.ents.append(e); return e
+        e=Entity(*a,**kw); self.ents.append(e)
+        try:
+            sc=e.scale
+            dims=(abs(float(sc.x)),abs(float(sc.y)),abs(float(sc.z)))
+            # Uzakta pahalı olmayan, küçük dekoratif ayrıntılar LOD ile render dışına alınabilir.
+            # Collider taşıyan duvar/zemin/mobilya ve çok büyük gök kubbeleri korunur.
+            e._kk_lod_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 3.6 and max(dims) > 0.015)
+            e._kk_occlusion_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 12.0 and max(dims) > 0.015)
+        except Exception:
+            e._kk_lod_candidate=False
+            e._kk_occlusion_candidate=False
+        return e
 
     def _make_torch(self, x, z, base_y=0.0, pole_h=1.15):
         self._mk(model=cyl(), scale=(0.09, pole_h, 0.09),
@@ -1205,6 +1615,16 @@ class Chapter2(Entity):
             self._mk(model='cube',position=pos,scale=scl,
                      color=color.rgb32(52,48,58),collider='box')
 
+        # Üstü kapalı savaş salonu: çatı ve kirişler dış ortamdan kopuk, ağır taş kale hissi verir.
+        self._mk(model='cube', position=(0, 7.28, 0), scale=(24.4, 0.72, 24.4),
+                 color=color.rgb32(38, 35, 44), collider='box')
+        for bx in (-9, -4.5, 0, 4.5, 9):
+            self._mk(model='cube', position=(bx, 6.78, 0), scale=(0.34, 0.22, 23.5),
+                     color=color.rgb32(30, 28, 36), collider=None)
+        for bz in (-9, -4.5, 0, 4.5, 9):
+            self._mk(model='cube', position=(0, 6.78, bz), scale=(23.5, 0.22, 0.34),
+                     color=color.rgb32(30, 28, 36), collider=None)
+
         # Mazgallar
         for i in range(-5,6,2):
             for z in [-11.3,11.3]:
@@ -1228,7 +1648,7 @@ class Chapter2(Entity):
         # Üst meşaleler: gerçekten sütun başlıklarının üzerine oturtulmuştur.
         # Sütun üst yüzeyi yaklaşık Y=5.78 olduğundan direk tam oradan başlar.
         for tx,tz in [(-8,-8),(8,-8),(-8,8),(8,8)]:
-            self._make_torch(tx, tz, base_y=5.78, pole_h=0.92)
+            self._make_torch(tx, tz, base_y=5.55, pole_h=0.55)
 
         # === ANAHTAR ===
         self.key = self._mk(
@@ -1340,7 +1760,7 @@ class Chapter2(Entity):
         self.boss.animate_scale(Vec3(0.01,0.01,0.01), duration=0.7)
         destroy(self.boss, delay=0.8)
         invoke(lambda: dlg.show(
-            "Karanlık Şövalye yere yıkıldı!\nKale titredi.\n\nŞimdi kuzey kapısını aç!",
+            "Karanlık Şövalye yere yıkıldı!\nKale titredi.\n\nŞimdi çıkış kapısını aç!",
             'Boss Yenildi'), delay=0.9)
 
     # ── Boss yapay zekâsı ────────────────────────────────────
@@ -1389,10 +1809,12 @@ class Chapter2(Entity):
         self.elapsed += time.dt
         for flame, inner, light, base_y, phase in self.torch_flames:
             pulse = math.sin(self.elapsed * 8.5 + phase)
-            flame.y = base_y + pulse * 0.035
+            flame.y = base_y + pulse * 0.045
             inner.y = flame.y + 0.06
-            flame.scale = 0.27 + 0.025 * (0.5 + 0.5 * pulse)
-            light['intensity'] = 1.55 + 0.50 * (0.5 + 0.5 * pulse)
+            flame.scale = (0.24 + 0.025 * pulse, 0.34 + 0.06 * pulse, 0.24 + 0.025 * pulse)
+            flame.rotation_z = math.sin(self.elapsed * 6.0 + phase) * 9.0
+            inner.scale_y = 0.12 + 0.025 * math.sin(self.elapsed * 12.0 + phase)
+            light['intensity'] = 1.45 + 0.65 * (0.5 + 0.5 * pulse)
         # Boss AI devam ederken altyazı yalnız oyuncu etkileşimlerini engeller.
         dt = time.dt
 
@@ -1408,7 +1830,7 @@ class Chapter2(Entity):
                 if held_keys['e']:
                     g.has_key = True; self.key.visible = False
                     hud.refresh(); hud.set_hint('')
-                    dlg.show("Altın anahtar!\nBoss'u yenip kuzey\nkapısını açabilirsin.", 'Anahtar Bulundu')
+                    dlg.show("Altın anahtar!\nKaranlık Şövalye'yi yenip\nçıkış kapısını açabilirsin.", 'Anahtar Bulundu')
                     return
         # Boss yakınında mı?
         if self.boss_alive and distance_xz(player.position, self.boss.position) < 3.6:
@@ -1417,7 +1839,7 @@ class Chapter2(Entity):
         if distance_xz(player.position, Vec3(0,2.5,-11.4)) < 3:
             if g.has_key and not self.boss_alive:
                 hint = '[ E ]  Kapıyı Aç'
-                if held_keys['e']: hud.set_hint(''); load_chapter(3); return
+                if held_keys['e']: hud.set_hint(''); load_chapter(4); return
             elif self.boss_alive: hint = 'Boss hâlâ yaşıyor!'
             elif not g.has_key:   hint = 'Anahtara ihtiyacın var!'
         hud.set_hint(hint)
@@ -1430,9 +1852,9 @@ class Chapter2(Entity):
         scene.fog_density=0
 
 # ─────────────────────────────────────────────────────────────
-#  BÖLÜM 3 – EJDERHA YUVASI
+#  BÖLÜM 4 – EJDERHA YUVASI / LAV PARKURU
 # ─────────────────────────────────────────────────────────────
-class Chapter3(Entity):
+class Chapter4(Entity):
     def __init__(self):
         super().__init__()
         self.ents=[]
@@ -1443,13 +1865,24 @@ class Chapter3(Entity):
             "Ejderhanın yuvasındasın!\n\n"
             "Lava dokunmadan platformları geç\n"
             "ve Prenses'i kafesten kurtar.",
-            'Bölüm 3 – Ejderha Yuvası'), delay=0.6)
+            'Bölüm 4 – Ejderha Yuvası'), delay=0.6)
 
     def _mk(self,*a,**kw):
         # Dünya modellerinde gölge alabilen ışıklandırma shader'ı.
         if kw.get('model') != 'sphere' or kw.get('scale') != 500:
             kw.setdefault('shader', torch_lighting_shader)
-        e=Entity(*a,**kw); self.ents.append(e); return e
+        e=Entity(*a,**kw); self.ents.append(e)
+        try:
+            sc=e.scale
+            dims=(abs(float(sc.x)),abs(float(sc.y)),abs(float(sc.z)))
+            # Uzakta pahalı olmayan, küçük dekoratif ayrıntılar LOD ile render dışına alınabilir.
+            # Collider taşıyan duvar/zemin/mobilya ve çok büyük gök kubbeleri korunur.
+            e._kk_lod_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 3.6 and max(dims) > 0.015)
+            e._kk_occlusion_candidate=(kw.get('collider') is None and bool(kw.get('visible', True)) and max(dims) <= 12.0 and max(dims) > 0.015)
+        except Exception:
+            e._kk_lod_candidate=False
+            e._kk_occlusion_candidate=False
+        return e
 
     def _build(self):
         # Mağara göğü: ay yerine koyu kızıl tavan ve havada süzülen közler.
@@ -1648,272 +2081,292 @@ class Chapter3(Entity):
         scene.fog_density=0
 
 
-# ── GELİŞMİŞ AYARLAR MENÜSÜ ────────────────────────────────────
+# ── PROFESYONEL KATEGORİLİ AYARLAR MENÜSÜ ───────────────────────
 settings_open = False
 graphics_quality = 'Yüksek'
-advanced_lighting_enabled = True  # Live reflection + AO; hardware DXR/path tracing is not available in Ursina.
+advanced_lighting_enabled = True
 saved_player_speed = 6
 saved_jump_height = 2.4
 menu_time = 0.0
+last_settings_category = 'Genel Grafikler'
 
-# Menü katmanları: karartma, kenar parıltısı, panel ve dekoratif çizgiler.
-settings_root = Entity(parent=camera.ui, enabled=False, z=0)
-settings_dim = Entity(parent=settings_root, model='quad', scale=(window.aspect_ratio * 2, 2),
-                      color=color.rgba32(2, 3, 10, 225), z=0)
-settings_glow = Entity(parent=settings_root, model='quad', scale=(1.02, 1.18),
-                       color=color.rgba32(50, 95, 150, 45), z=-0.005)
-settings_panel = Entity(parent=settings_root, model='quad', scale=(0.88, 1.12),
-                        color=color.rgba32(13, 18, 31, 248), z=-0.01)
-settings_panel_inner = Entity(parent=settings_root, model='quad', scale=(0.85, 1.09),
-                              color=color.rgba32(20, 27, 43, 248), z=-0.015)
-Entity(parent=settings_root, model='quad', scale=(0.84, 0.008), y=0.39,
-       color=color.rgb32(75, 190, 255), z=-0.025)
-Entity(parent=settings_root, model='quad', scale=(0.84, 0.003), y=-0.535,
-       color=color.rgb32(170, 75, 220), z=-0.025)
+settings_root = Entity(parent=camera.ui, enabled=False, z=0, scale=(.94, .92))
+Entity(parent=settings_root, model='quad', scale=(2,2), color=color.rgba32(2,5,14,238), z=0)
+Entity(parent=settings_root, model='quad', scale=(1.86,1.48), color=color.rgba32(9,15,28,250), z=-0.01)
+Entity(parent=settings_root, model='quad', scale=(1.82,1.44), color=color.rgba32(17,25,41,250), z=-0.015)
+settings_glow = Entity(parent=settings_root, model='quad', scale=(1.90,1.56), color=color.rgba32(45,105,165,18), z=-0.02)
+Entity(parent=settings_root, model='quad', scale=(1.82,0.012), y=0.70, color=color.rgb32(70,190,255), z=-0.025)
+Text('KARANLIK KRAL', parent=settings_root, x=-0.82, y=0.61, scale=.98, origin=(-.5,0), color=color.rgb32(115,210,255), z=-0.04)
+Text('SİSTEM AYARLARI', parent=settings_root, x=-0.82, y=0.51, scale=.65, origin=(-.5,0), color=color.rgb32(165,180,202), z=-0.04)
+Entity(parent=settings_root, model='quad', x=-0.30, y=-0.01, scale=(0.004,1.18), color=color.rgb32(50,68,91), z=-0.03)
 
-Text('KARANLIK KRAL', parent=settings_root, y=0.455, scale=0.75,
-     origin=(0, 0), color=color.rgb32(115, 205, 255), z=-0.04)
-Text('GÖRÜNTÜ / IŞIKLANDIRMA AYARLARI', parent=settings_root, y=0.34, scale=0.92,
-     origin=(0, 0), color=color.rgb32(245, 232, 210), z=-0.04)
-Text('GÖRSEL KALİTE', parent=settings_root, x=-0.34, y=0.22, scale=0.95,
-     origin=(-0.5, 0), color=color.rgb32(185, 202, 225), z=-0.04)
+category_panels = {}
+for _cat in ('Genel Grafikler','Işın İzleme','Kare Artırıcı'):
+    category_panels[_cat] = Entity(parent=settings_root, enabled=False, z=-0.04)
 
-quality_label = Text('SEÇİLİ: YÜKSEK', parent=settings_root, y=0.105, scale=0.95,
-                     origin=(0, 0), color=color.rgb32(100, 220, 255), z=-0.04)
-ray_label = Text('EKRAN-UZAYI IŞIN İZLEME: KAPALI', parent=settings_root, y=0.035,
-                 scale=0.82, origin=(0, 0), color=color.rgb32(255, 180, 95), z=-0.04)
-ray_note = Text('Görünmez ışınlar görünen sahne derinliğinde izlenir.',
-                parent=settings_root, y=-0.015, scale=0.54, origin=(0, 0),
-                color=color.rgb32(165, 178, 198), z=-0.04)
-upscaler_label = Text('KARE ARTTIRICI: AÇIK',
-                      parent=settings_root, y=-0.145, scale=0.72, origin=(0, 0),
-                      color=color.rgb32(110, 245, 165), z=-0.04)
-upscaler_note = Text('Düşük çözünürlükten 1080p’ye ölçekler; açıkken görüş dışı modeller geçici gizlenir.',
-                     parent=settings_root, y=-0.185, scale=0.48, origin=(0, 0),
-                     color=color.rgb32(165, 178, 198), z=-0.04)
-upscaler_profile_heading = Text('KARE ARTTIRICI ÇÖZÜNÜRLÜK PROFİLİ',
-                               parent=settings_root, y=-0.315, scale=0.62, origin=(0, 0),
-                               color=color.rgb32(185, 202, 225), z=-0.04)
-upscaler_profile_label = Text('PROFİL: YÜKSEK  |  1280×720 → 1920×1080',
-                             parent=settings_root, y=-0.435, scale=0.48, origin=(0, 0),
-                             color=color.rgb32(100, 220, 255), z=-0.04)
+def show_settings_category(name):
+    global last_settings_category
+    if name not in category_panels: return
+    last_settings_category = name
+    for cat, panel in category_panels.items(): panel.enabled = (cat == name)
+    for cat, button in category_buttons.items():
+        selected = cat == name
+        button.color = color.rgb32(28,112,151) if selected else color.rgb32(25,35,53)
+        button.highlight_color = color.rgb32(55,145,185) if selected else color.rgb32(55,72,96)
 
-def _set_shadow_quality(resolution):
+category_buttons = {}
+def _category_button(label, y):
+    b = Button(parent=settings_root, text=label, x=-.66, y=y, scale=(.50,.082),
+               color=color.rgb32(25,35,53), highlight_color=color.rgb32(55,72,96),
+               pressed_color=color.rgb32(40,130,165), text_color=color.white, z=-.06)
+    b.on_click = lambda label=label: show_settings_category(label)
+    b.ignore_paused = True
+    # Give long category names enough room while keeping them readable.
     try:
-        if resolution <= 0:
-            sun._light.setShadowCaster(False)
-            sun.shadows = False
-        else:
-            sun.shadow_map_resolution = Vec2(resolution, resolution)
-            sun._light.setShadowCaster(True, int(resolution), int(resolution))
-            sun.shadows = True
-            sun.update_bounds(shadow_bounds)
-    except Exception as shadow_error:
-        print('[GÖLGE] Kalite değiştirilemedi:', shadow_error)
+        b.text_entity.scale = 0.93
+    except Exception:
+        pass
+    category_buttons[label] = b
+    return b
+_category_button('Genel Grafikler', .34)
+_category_button('Işın İzleme', .16)
+_category_button('Kare Artırıcı', -.02)
 
+# Genel Grafikler paneli
+_general = category_panels['Genel Grafikler']
+Text('GÖRSEL KALİTE', parent=_general, x=-.12, y=.38, scale=.78, origin=(-.5,0), color=color.rgb32(190,205,225), z=-.05)
+quality_label = Text('SEÇİLİ: YÜKSEK', parent=_general, x=-.12, y=.28, scale=.72, origin=(-.5,0), color=color.rgb32(100,220,255), z=-.05)
 
-def apply_graphics_quality(level):
-    global graphics_quality
-    graphics_quality = level
-    quality_label.text = 'SEÇİLİ: ' + level.upper()
-
-    active_chapter = globals().get('current_ch')
-    chapter_fog_color = getattr(active_chapter, 'atmosphere_fog_color', color.rgb32(7, 10, 24))
-    chapter_fog_density = getattr(active_chapter, 'atmosphere_fog_density', 0.026)
-    if level == 'Düşük':
-        scene.fog_density = chapter_fog_density * 0.72
-        scene.fog_color = chapter_fog_color
-        _set_shadow_quality(512)
-    elif level == 'Orta':
-        scene.fog_density = chapter_fog_density
-        scene.fog_color = chapter_fog_color
-        _set_shadow_quality(1024)
-    else:
-        scene.fog_density = chapter_fog_density * 1.12
-        scene.fog_color = chapter_fog_color
-        _set_shadow_quality(2048)
-
-    set_postfx_quality(level)
-    effects_active = advanced_lighting_enabled and level != 'Düşük' and (RT_PIPELINE_AVAILABLE or reflection_enabled)
-    set_reflection_pass(effects_active)
-    if RT_PIPELINE_AVAILABLE:
-        ray_label.text = 'EKRAN-UZAYI IŞIN İZLEME: ' + ('AÇIK' if effects_active else 'KAPALI')
-        ray_label.color = color.rgb32(110, 245, 165) if effects_active else color.rgb32(255, 180, 95)
-    else:
-        ray_label.text = 'GPU RT SHADER BAŞLATILAMADI'
-        ray_label.color = color.rgb32(255, 90, 90)
-    for b in quality_buttons:
-        selected = b.text.upper() == level.upper()
-        b.color = color.rgb32(35, 115, 160) if selected else color.rgb32(35, 43, 62)
-        b.highlight_color = color.rgb32(65, 155, 200) if selected else color.rgb32(65, 80, 108)
-
-def apply_ray_tracing(enabled):
-    global advanced_lighting_enabled
-    advanced_lighting_enabled = bool(enabled)
-    active = advanced_lighting_enabled and graphics_quality != 'Düşük' and (RT_PIPELINE_AVAILABLE or reflection_enabled)
-    if RT_PIPELINE_AVAILABLE:
-        ray_label.text = 'EKRAN-UZAYI IŞIN İZLEME: ' + ('AÇIK' if active else 'KAPALI')
-        ray_label.color = color.rgb32(110, 245, 165) if active else color.rgb32(255, 180, 95)
-    else:
-        ray_label.text = 'GPU RT SHADER BAŞLATILAMADI'
-        ray_label.color = color.rgb32(255, 90, 90)
-    set_reflection_pass(active)
-    # Gölge haritası kalite ayarından bağımsızdır; kapat-aç düğmesi gölgeleri bozmaz.
-    _set_shadow_quality({'Düşük': 512, 'Orta': 1024, 'Yüksek': 2048}[graphics_quality])
-    set_postfx_quality(graphics_quality)
-
-def apply_frame_upscaler(enabled):
-    """Enable or disable spatial upscaling for the active resolution profile."""
-    global upscaler_enabled
-    requested = bool(enabled)
-    if not RT_PIPELINE_AVAILABLE or rt_manager is None or rt_quad is None:
-        upscaler_enabled = False
-        upscaler_label.text = 'KARE ARTTIRICI: KULLANILAMIYOR (GPU POSTFX KAPALI)'
-        upscaler_label.color = color.rgb32(255, 105, 105)
-        upscaler_note.text = 'Render hattı başlatılamadığı için ölçekleme uygulanamadı.'
-        return
-
-    upscaler_enabled = requested
-    try:
-        # FilterManager renders internally at the selected profile's source size.
-        # The fullscreen output is displayed at that profile's output size.
-        rt_manager.forcex = UPSCALE_SOURCE_WIDTH if requested else 0
-        rt_manager.forcey = UPSCALE_SOURCE_HEIGHT if requested else 0
-        rt_manager.resizeBuffers()
-        rt_color_tex.setMinfilter(Texture.FTLinear)
-        rt_color_tex.setMagfilter(Texture.FTLinear)
-        rt_depth_tex.setMinfilter(Texture.FTNearest)
-        rt_depth_tex.setMagfilter(Texture.FTNearest)
-        rt_quad.setShaderInput('upscalerEnabled', 1 if requested else 0)
-        rt_quad.setShaderInput('upscaleSharpness', 0.42 if requested else 0.0)
-        if requested:
-            upscaler_label.text = 'KARE ARTTIRICI: AÇIK  |  ' + f'{UPSCALE_SOURCE_WIDTH}×{UPSCALE_SOURCE_HEIGHT} → {UPSCALE_OUTPUT_WIDTH}×{UPSCALE_OUTPUT_HEIGHT}'
-        else:
-            upscaler_label.text = f'KARE ARTTIRICI: KAPALI  |  ÇIKIŞ {UPSCALE_OUTPUT_WIDTH}×{UPSCALE_OUTPUT_HEIGHT}'
-        upscaler_label.color = color.rgb32(110, 245, 165) if requested else color.rgb32(255, 180, 95)
-        upscaler_note.text = ('Uzamsal ölçekleme + kenar-duyarlı keskinleştirme; yapay zekâ DLSS değildir.' if requested
-                              else 'Profil seçimi saklanır; kapalıyken tam çıkış çözünürlüğü işlenir.')
-        update_raytrace_uniforms()
-    except Exception as upscale_error:
-        upscaler_enabled = False
-        upscaler_label.text = 'KARE ARTTIRICI: HATA'
-        upscaler_label.color = color.rgb32(255, 90, 90)
-        upscaler_note.text = str(upscale_error)[:90]
-        print('[KARE ARTTIRICI] Ölçekleme uygulanamadı:', upscale_error)
-
-
-
-def apply_upscaler_profile(profile):
-    # Apply one of the three requested internal-render/output-resolution profiles.
-    global upscaler_profile, UPSCALE_SOURCE_WIDTH, UPSCALE_SOURCE_HEIGHT
-    global UPSCALE_OUTPUT_WIDTH, UPSCALE_OUTPUT_HEIGHT
-    if profile not in UPSCALE_PROFILES:
-        return
-    upscaler_profile = profile
-    (UPSCALE_SOURCE_WIDTH, UPSCALE_SOURCE_HEIGHT,
-     UPSCALE_OUTPUT_WIDTH, UPSCALE_OUTPUT_HEIGHT) = UPSCALE_PROFILES[profile]
-
-    # All profiles output 1080p; Performance uses a 360p internal render.
-    try:
-        window.size = (UPSCALE_OUTPUT_WIDTH, UPSCALE_OUTPUT_HEIGHT)
-    except Exception as output_size_error:
-        print('[KARE ARTTIRICI] Çıkış çözünürlüğü değiştirilemedi:', output_size_error)
-
-    try:
-        if RT_PIPELINE_AVAILABLE and rt_manager is not None:
-            rt_manager.forcex = UPSCALE_SOURCE_WIDTH if upscaler_enabled else 0
-            rt_manager.forcey = UPSCALE_SOURCE_HEIGHT if upscaler_enabled else 0
-            rt_manager.resizeBuffers()
-        apply_frame_upscaler(upscaler_enabled)
-    except Exception as profile_error:
-        print('[KARE ARTTIRICI] Profil uygulanamadı:', profile_error)
-
-    upscaler_profile_label.text = (
-        f'PROFİL: {profile.upper()}  |  '
-        f'{UPSCALE_SOURCE_WIDTH}×{UPSCALE_SOURCE_HEIGHT} → '
-        f'{UPSCALE_OUTPUT_WIDTH}×{UPSCALE_OUTPUT_HEIGHT}'
-    )
-    for button in upscaler_profile_buttons:
-        selected = button.text.upper() == profile.upper()
-        button.color = color.rgb32(35, 125, 155) if selected else color.rgb32(35, 43, 62)
-        button.highlight_color = color.rgb32(70, 175, 205) if selected else color.rgb32(65, 80, 108)
-    update_raytrace_uniforms()
-
-
-def open_settings():
-    global settings_open
-    if settings_open:
-        return
-    settings_open = True
-    settings_root.enabled = True
-    if not hasattr(open_settings, '_saved'):
-        open_settings._saved = (player.speed, player.jump_height)
-    player.speed = 0
-    player.jump_height = 0
-    mouse.locked = False
-    mouse.visible = True
-    # Ursina pauselenince NPC'ler, fiziğin/update'lerin ve oyun zamanlayıcıları durur.
-    # Menü entity'leri ignore_paused=True olduğundan tıklanmaya devam eder.
-    application.paused = True
-    settings_panel.scale = (0.82, 1.04)
-    settings_panel.animate_scale((0.88, 1.12), duration=0.16, curve=curve.out_back)
-
-def close_settings():
-    global settings_open
-    settings_open = False
-    settings_root.enabled = False
-    if hasattr(open_settings, '_saved'):
-        player.speed, player.jump_height = open_settings._saved
-        del open_settings._saved
-    # Önce oyunu devam ettir, sonra kamera faresini yeniden kilitle.
-    application.paused = False
-    mouse.locked = True
-    mouse.visible = False
-
-def _make_setting_button(label, x, y, action, scale=(0.20, 0.065)):
-    b = Button(parent=settings_root, text=label, x=x, y=y, scale=scale,
-               color=color.rgb32(35, 43, 62), highlight_color=color.rgb32(65, 115, 150),
-               pressed_color=color.rgb32(75, 160, 195), text_color=color.white,
-               z=-0.06)
+def _make_panel_button(parent, label, x, y, action, scale=(.23,.064)):
+    b = Button(parent=parent, text=label, x=x, y=y, scale=scale,
+               color=color.rgb32(30,43,63), highlight_color=color.rgb32(58,119,155),
+               pressed_color=color.rgb32(65,150,185), text_color=color.white, z=-.07)
     b.on_click = action
+    b.ignore_paused = True
+    try:
+        b.text_entity.scale = 0.86
+    except Exception:
+        pass
     return b
 
 quality_buttons = []
-quality_buttons.append(_make_setting_button('DÜŞÜK', -0.235, 0.155,
-                                             lambda: apply_graphics_quality('Düşük')))
-quality_buttons.append(_make_setting_button('ORTA', 0, 0.155,
-                                             lambda: apply_graphics_quality('Orta')))
-quality_buttons.append(_make_setting_button('YÜKSEK', 0.235, 0.155,
-                                             lambda: apply_graphics_quality('Yüksek')))
-_make_setting_button('IŞIN İZLEME EFEKTLERİ: AÇ / KAPAT', 0, -0.095,
-                     lambda: apply_ray_tracing(not advanced_lighting_enabled),
-                     scale=(0.48, 0.065))
-_make_setting_button('KARE ARTTIRICI: AÇ / KAPAT', 0, -0.245,
-                     lambda: apply_frame_upscaler(not upscaler_enabled),
-                     scale=(0.42, 0.060))
-upscaler_profile_buttons = []
-upscaler_profile_buttons.append(_make_setting_button('PERFORMANS', -0.245, -0.375,
-                                  lambda: apply_upscaler_profile('Performans'), scale=(0.22, 0.055)))
-upscaler_profile_buttons.append(_make_setting_button('DENGELİ', 0, -0.375,
-                                  lambda: apply_upscaler_profile('Dengeli'), scale=(0.22, 0.055)))
-upscaler_profile_buttons.append(_make_setting_button('YÜKSEK', 0.245, -0.375,
-                                  lambda: apply_upscaler_profile('Yüksek'), scale=(0.22, 0.055)))
-_make_setting_button('OYUNA DÖN', 0, -0.495, close_settings, scale=(0.28, 0.050))
+for label, x in [('DÜŞÜK',-.07),('ORTA',.20),('YÜKSEK',.47)]:
+    quality_buttons.append(_make_panel_button(_general,label,x,.18,lambda level={'DÜŞÜK':'Düşük','ORTA':'Orta','YÜKSEK':'Yüksek'}[label]:apply_graphics_quality(level)))
+Text('Oyun içi sis, gölge ve son işlem kalitesini yönetir.', parent=_general, x=-.12, y=-.01, scale=.50, origin=(-.5,0), color=color.rgb32(150,170,195), z=-.05)
+Text('ÇIKIŞ ÇÖZÜNÜRLÜĞÜ', parent=_general, x=-.12, y=-.14, scale=.70, origin=(-.5,0), color=color.rgb32(190,205,225), z=-.05)
+_make_panel_button(_general,'720p',.00,-.27,lambda:set_output_resolution('720p'),scale=(.19,.06))
+_make_panel_button(_general,'900p',.28,-.27,lambda:set_output_resolution('900p'),scale=(.19,.06))
+_make_panel_button(_general,'1080p',.56,-.27,lambda:set_output_resolution('1080p'),scale=(.19,.06))
 
-# Menü arka planına düşük maliyetli, animasyonlu parçacıklar.
-menu_sparks = []
-for i in range(24):
-    spark = Entity(parent=settings_root, model='quad',
-                   scale=(random.uniform(0.002, 0.006), random.uniform(0.008, 0.025)),
-                   x=random.uniform(-0.82, 0.82), y=random.uniform(-0.52, 0.52),
-                   color=color.rgba32(70, 170, 255, random.randint(35, 105)),
-                   z=-0.03)
-    spark.rotation_z = random.uniform(-25, 25)
-    menu_sparks.append((spark, random.uniform(0.2, 0.8)))
+# Işın İzleme paneli
+_ray_panel = category_panels['Işın İzleme']
+ray_label = Text('EKRAN-UZAYI IŞIN İZLEME', parent=_ray_panel, x=-.12, y=.38, scale=.70, origin=(-.5,0), color=color.rgb32(255,180,95), z=-.05)
+ray_note = Text('SSRT: ekran uzayındaki yansımalar ve ortam gölgeleme.', parent=_ray_panel, x=-.12, y=.27, scale=.50, origin=(-.5,0), color=color.rgb32(155,175,198), z=-.05)
+_make_panel_button(_ray_panel,'IŞIN İZLEME EFEKTLERİ: AÇ / KAPAT',.18,.15,lambda:apply_ray_tracing(not advanced_lighting_enabled),scale=(.56,.062))
+config_bounce_label = Text('BOUNCE: 0', parent=_ray_panel, x=-.12, y=-.01, scale=.70, origin=(-.5,0), color=color.rgb32(255,190,100), z=-.05)
+_make_panel_button(_ray_panel,'BOUNCE −',.04,-.13,lambda:set_bounce_count(rt_bounces-1),scale=(.24,.07))
+_make_panel_button(_ray_panel,'BOUNCE +',.32,-.13,lambda:set_bounce_count(rt_bounces+1),scale=(.24,.07))
+config_steps_label = Text('IŞIN ADIMI: 48', parent=_ray_panel, x=-.12, y=-.27, scale=.70, origin=(-.5,0), color=color.rgb32(255,190,100), z=-.05)
+_make_panel_button(_ray_panel,'ADIM −',.04,-.37,lambda:set_trace_steps(rt_trace_steps-4),scale=(.24,.07))
+_make_panel_button(_ray_panel,'ADIM +',.32,-.37,lambda:set_trace_steps(rt_trace_steps+4),scale=(.24,.07))
 
-# Ursina pauselendiğinde menü elemanları çizilmeye ve giriş almaya devam etsin.
+# Kare artırıcı paneli
+_up_panel = category_panels['Kare Artırıcı']
+upscaler_label = Text('KARE ARTTIRICI: AÇIK', parent=_up_panel, x=-.12, y=.38, scale=.70, origin=(-.5,0), color=color.rgb32(110,245,165), z=-.05)
+upscaler_note = Text('Performans ve Dengeli profillerinde görüş dışı nesne önbelleği çalışır.', parent=_up_panel, x=-.12, y=.27, scale=.47, origin=(-.5,0), color=color.rgb32(155,175,198), z=-.05)
+_make_panel_button(_up_panel,'KARE ARTTIRICI: AÇ / KAPAT',.18,.15,lambda:apply_frame_upscaler(not upscaler_enabled),scale=(.56,.062))
+upscaler_profile_heading = Text('İÇ ÇÖZÜNÜRLÜK PROFİLİ', parent=_up_panel, x=-.12, y=.00, scale=.67, origin=(-.5,0), color=color.rgb32(190,205,225), z=-.05)
+upscaler_profile_label = Text('PROFİL: YÜKSEK', parent=_up_panel, x=-.12, y=-.09, scale=.58, origin=(-.5,0), color=color.rgb32(100,220,255), z=-.05)
+upscaler_profile_buttons=[]
+for label, profile, x in [('PERFORMANS','Performans',-.02),('DENGELİ','Dengeli',.25),('YÜKSEK','Yüksek',.52)]:
+    upscaler_profile_buttons.append(_make_panel_button(_up_panel,label,x,-.19,lambda profile=profile:apply_upscaler_profile(profile),scale=(.24,.07)))
+Text('ARKA NESNE ÖNBELLEĞİ', parent=_up_panel, x=-.12, y=-.29, scale=.65, origin=(-.5,0), color=color.rgb32(190,205,225), z=-.05)
+culling_delay_label = Text('Görüş dışında kalma süresi: 10 sn', parent=_up_panel, x=-.12, y=-.38, scale=.54, origin=(-.5,0), color=color.rgb32(100,220,255), z=-.05)
+
+def set_culling_delay(seconds):
+    global VIEW_UNLOAD_DELAY
+    VIEW_UNLOAD_DELAY = max(1.0, min(30.0, float(seconds)))
+    culling_delay_label.text = f'Görüş dışında kalma süresi: {VIEW_UNLOAD_DELAY:g} sn'
+
+_make_panel_button(_up_panel,'− 1 sn',.04,-.48,lambda:set_culling_delay(VIEW_UNLOAD_DELAY-1),scale=(.22,.065))
+_make_panel_button(_up_panel,'+ 1 sn',.31,-.48,lambda:set_culling_delay(VIEW_UNLOAD_DELAY+1),scale=(.22,.065))
+
+# Alt sabit kontrol alanı
+Entity(parent=settings_root, model='quad', x=.28, y=-.61, scale=(1.72,.003), color=color.rgb32(48,65,86), z=-.05)
+_make_panel_button(settings_root,'OYUNA DÖN',.66,-.66,lambda: close_settings(),scale=(.30,.058))
+
+# Animasyonlu ama düşük maliyetli menü parçacıkları
+menu_sparks=[]
+for i in range(18):
+    spark=Entity(parent=settings_root, model='quad', scale=(random.uniform(.002,.005),random.uniform(.008,.02)),
+                 x=random.uniform(-.7,.7), y=random.uniform(-.6,.6), color=color.rgba32(70,170,255,random.randint(25,75)), z=-.02)
+    spark.ignore_paused=True
+    menu_sparks.append((spark,random.uniform(.2,.8)))
+
+OUTPUT_RESOLUTIONS={'720p':(1280,720),'900p':(1600,900),'1080p':(1920,1080)}
+current_output_resolution='1080p'
+def set_output_resolution(name):
+    global current_output_resolution, UPSCALE_OUTPUT_WIDTH, UPSCALE_OUTPUT_HEIGHT
+    if name not in OUTPUT_RESOLUTIONS: return
+    current_output_resolution=name
+    UPSCALE_OUTPUT_WIDTH,UPSCALE_OUTPUT_HEIGHT=OUTPUT_RESOLUTIONS[name]
+    try:
+        # Seçilen çıkış çözünürlüğünü pencereye uygula; pencere modunda ekran boyutunu
+        # yeni çözünürlüğe uydur, render hedeflerini de yeniden boyutlandır.
+        window.fullscreen = False
+        window.size = (UPSCALE_OUTPUT_WIDTH, UPSCALE_OUTPUT_HEIGHT)
+        try:
+            from panda3d.core import WindowProperties
+            props = WindowProperties()
+            props.setSize(int(UPSCALE_OUTPUT_WIDTH), int(UPSCALE_OUTPUT_HEIGHT))
+            base.win.requestProperties(props)
+        except Exception:
+            pass
+    except Exception as exc:
+        print('[CONFIG] Çözünürlük uygulanamadı:', exc)
+    try:
+        if RT_PIPELINE_AVAILABLE and rt_manager is not None: rt_manager.resizeBuffers()
+        update_raytrace_uniforms()
+    except Exception as exc: print('[CONFIG] Render hedefi güncellenemedi:',exc)
+
+def set_bounce_count(value):
+    global rt_bounces
+    rt_bounces=max(0,min(4,int(value)))
+    if RT_PIPELINE_AVAILABLE and rt_quad is not None:
+        try: rt_quad.setShaderInput('maxBounces',int(rt_bounces))
+        except Exception as exc: print('[CONFIG] Bounce uygulanamadı:',exc)
+    if 'config_bounce_label' in globals(): config_bounce_label.text=f'BOUNCE: {rt_bounces}'
+
+def set_trace_steps(value):
+    global rt_trace_steps
+    rt_trace_steps=max(4,min(96,int(value)))
+    if RT_PIPELINE_AVAILABLE and rt_quad is not None:
+        try: rt_quad.setShaderInput('traceSteps',int(rt_trace_steps))
+        except Exception as exc: print('[CONFIG] Işın adımı uygulanamadı:',exc)
+    if 'config_steps_label' in globals(): config_steps_label.text=f'IŞIN ADIMI: {rt_trace_steps}'
+
+def apply_graphics_quality(level):
+    global graphics_quality
+    graphics_quality=level
+    quality_label.text='SEÇİLİ: '+level.upper()
+    active_chapter=globals().get('current_ch')
+    fog_color=getattr(active_chapter,'atmosphere_fog_color',color.rgb32(7,10,24))
+    fog_density=getattr(active_chapter,'atmosphere_fog_density',.026)
+    if level=='Düşük': scene.fog_density=fog_density*.72; _set_shadow_quality(512)
+    elif level=='Orta': scene.fog_density=fog_density; _set_shadow_quality(1024)
+    else: scene.fog_density=fog_density*1.12; _set_shadow_quality(3072)
+    scene.fog_color=fog_color
+    set_postfx_quality(level)
+    active=advanced_lighting_enabled and level!='Düşük' and (RT_PIPELINE_AVAILABLE or reflection_enabled)
+    set_reflection_pass(active)
+    if RT_PIPELINE_AVAILABLE:
+        ray_label.text='EKRAN-UZAYI IŞIN İZLEME: '+('AÇIK' if active else 'KAPALI')
+        ray_label.color=color.rgb32(110,245,165) if active else color.rgb32(255,180,95)
+    else:
+        ray_label.text='GPU RT SHADER BAŞLATILAMADI'; ray_label.color=color.rgb32(255,90,90)
+    for b in quality_buttons:
+        selected=b.text.upper()==level.upper(); b.color=color.rgb32(35,115,160) if selected else color.rgb32(35,43,62)
+
+def apply_ray_tracing(enabled):
+    global advanced_lighting_enabled
+    advanced_lighting_enabled=bool(enabled)
+    active=advanced_lighting_enabled and graphics_quality!='Düşük' and (RT_PIPELINE_AVAILABLE or reflection_enabled)
+    ray_label.text='EKRAN-UZAYI IŞIN İZLEME: '+('AÇIK' if active else 'KAPALI') if RT_PIPELINE_AVAILABLE else 'GPU RT SHADER BAŞLATILAMADI'
+    ray_label.color=color.rgb32(110,245,165) if active else color.rgb32(255,180,95)
+    set_reflection_pass(active)
+    _set_shadow_quality({'Düşük':768,'Orta':1536,'Yüksek':3072}[graphics_quality])
+    set_postfx_quality(graphics_quality)
+
+def apply_frame_upscaler(enabled):
+    global upscaler_enabled
+    requested=bool(enabled)
+    if not RT_PIPELINE_AVAILABLE or rt_manager is None or rt_quad is None:
+        upscaler_enabled=False; upscaler_label.text='KARE ARTTIRICI: KULLANILAMIYOR'; upscaler_label.color=color.rgb32(255,105,105)
+        upscaler_note.text='Render hattı başlatılamadığı için ölçekleme uygulanamadı.'; return
+    upscaler_enabled=requested
+    try:
+        rt_manager.forcex=UPSCALE_SOURCE_WIDTH if requested else 0
+        rt_manager.forcey=UPSCALE_SOURCE_HEIGHT if requested else 0
+        rt_manager.resizeBuffers()
+        rt_color_tex.setMinfilter(Texture.FTLinear); rt_color_tex.setMagfilter(Texture.FTLinear)
+        rt_depth_tex.setMinfilter(Texture.FTNearest); rt_depth_tex.setMagfilter(Texture.FTNearest)
+        rt_quad.setShaderInput('upscalerEnabled',1 if requested else 0)
+        rt_quad.setShaderInput('upscaleSharpness',.42 if requested else 0.0)
+        upscaler_label.text='KARE ARTTIRICI: '+('AÇIK' if requested else 'KAPALI')
+        upscaler_label.color=color.rgb32(110,245,165) if requested else color.rgb32(255,180,95)
+        upscaler_note.text='Performans/Dengeli: görüş dışı nesne önbelleği açık.' if requested else 'Kapalı: nesne önbelleği otomatik devre dışı.'
+        update_raytrace_uniforms()
+    except Exception as exc:
+        upscaler_enabled=False; upscaler_label.text='KARE ARTTIRICI: HATA'; upscaler_note.text=str(exc)[:90]
+        print('[KARE ARTTIRICI] Ölçekleme uygulanamadı:',exc)
+
+def apply_upscaler_profile(profile, automatic=False):
+    global upscaler_profile, UPSCALE_SOURCE_WIDTH, UPSCALE_SOURCE_HEIGHT, UPSCALE_OUTPUT_WIDTH, UPSCALE_OUTPUT_HEIGHT
+    global auto_perf_active, auto_perf_has_triggered, auto_saved_graphics_quality
+    if profile not in UPSCALE_PROFILES: return
+    if not automatic:
+        # Kullanıcı elle profil seçtiyse adaptif modun yaptığı grafik düşürmesini geri al.
+        if auto_perf_active and profile != 'Performans' and auto_saved_graphics_quality in ('Düşük','Orta','Yüksek'):
+            auto_perf_active=False
+            try:
+                if globals().get('graphics_quality') != auto_saved_graphics_quality:
+                    apply_graphics_quality(auto_saved_graphics_quality)
+            except Exception:
+                pass
+        else:
+            auto_perf_active=False
+        auto_perf_has_triggered = (profile == 'Performans')
+    else:
+        auto_perf_active=True
+        auto_perf_has_triggered=True
+    upscaler_profile=profile
+    source_w,source_h,_ow,_oh=UPSCALE_PROFILES[profile]
+    UPSCALE_SOURCE_WIDTH,UPSCALE_SOURCE_HEIGHT=source_w,source_h
+    output_size=OUTPUT_RESOLUTIONS.get(current_output_resolution,(1920,1080))
+    UPSCALE_OUTPUT_WIDTH,UPSCALE_OUTPUT_HEIGHT=output_size
+    try: window.size=(UPSCALE_OUTPUT_WIDTH,UPSCALE_OUTPUT_HEIGHT)
+    except Exception as exc: print('[KARE ARTTIRICI] Çıkış çözünürlüğü değiştirilemedi:',exc)
+    try:
+        if RT_PIPELINE_AVAILABLE and rt_manager is not None:
+            rt_manager.forcex=UPSCALE_SOURCE_WIDTH if upscaler_enabled else 0
+            rt_manager.forcey=UPSCALE_SOURCE_HEIGHT if upscaler_enabled else 0
+            rt_manager.resizeBuffers()
+        apply_frame_upscaler(upscaler_enabled)
+    except Exception as exc: print('[KARE ARTTIRICI] Profil uygulanamadı:',exc)
+    upscaler_profile_label.text=f'PROFİL: {profile.upper()}  |  {source_w}x{source_h} to {UPSCALE_OUTPUT_WIDTH}x{UPSCALE_OUTPUT_HEIGHT}'
+    for b in upscaler_profile_buttons:
+        selected=b.text.upper()==profile.upper(); b.color=color.rgb32(35,125,155) if selected else color.rgb32(35,43,62)
+    update_raytrace_uniforms()
+
+def _set_shadow_quality(resolution):
+    try:
+        if resolution<=0: sun._light.setShadowCaster(False); sun.shadows=False
+        else:
+            sun.shadow_map_resolution=Vec2(resolution,resolution)
+            sun._light.setShadowCaster(True,int(resolution),int(resolution)); sun.shadows=True; sun.update_bounds(shadow_bounds)
+    except Exception as exc: print('[GÖLGE] Kalite değiştirilemedi:',exc)
+
+def open_settings():
+    global settings_open
+    if settings_open: return
+    settings_open=True; settings_root.enabled=True
+    if not hasattr(open_settings,'_saved'): open_settings._saved=(player.speed,player.jump_height)
+    player.speed=0; player.jump_height=0; mouse.locked=False; mouse.visible=True
+    application.paused=True
+    show_settings_category(last_settings_category)
+
+def close_settings():
+    global settings_open
+    settings_open=False; settings_root.enabled=False
+    if hasattr(open_settings,'_saved'):
+        player.speed,player.jump_height=open_settings._saved; del open_settings._saved
+    application.paused=False; mouse.locked=True; mouse.visible=False
+
 for _menu_entity in settings_root.children:
-    _menu_entity.ignore_paused = True
+    _menu_entity.ignore_paused=True
+for _cat_panel in category_panels.values():
+    for _ent in _cat_panel.children: _ent.ignore_paused=True
+show_settings_category(last_settings_category)
 
 # ─────────────────────────────────────────────────────────────
 #  OYUNCU & BÖLÜM YÜKLEYİCİ
@@ -1934,12 +2387,30 @@ for _ in range(36):
 
 current_ch=None
 
-# Kare Arttırıcı açıkken görüş dışındaki dekorları geçici olarak gizle.
-# Entity'ler yok edilmez: kamera geri döndüğünde tekrar görünürler ve bölüm durumu korunur.
+# Adaptif performans yöneticisi. FPS 25'in altında istikrarlı biçimde kalırsa
+# tek seferlik Performans profiline geçer; ayar elle değiştirilince yeniden hazır olur.
+AUTO_PERFORMANCE_ENABLED = True
+auto_perf_active = False
+auto_perf_has_triggered = False
+auto_perf_low_time = 0.0
+auto_perf_warmup = 0.0
+auto_perf_fps_smooth = 60.0
+auto_saved_graphics_quality = None
+
+# Görüş alanı / mesafe / duvar arkası elemesi. Yalnızca aktif bölümdeki modeller taranır.
+# Entity'ler ve collider'lar silinmez; önbellekten geri açılabilirler.
 view_culling_enabled = True
-view_culling_interval = 0.12
+view_culling_interval = 0.14       # CPU giderini azaltmak için yaklaşık 7 kez/sn
 view_culling_timer = 0.0
-view_culling_hidden = {}  # id(entity) -> entity; yalnızca bizim gizlediklerimiz
+occlusion_cache = {}               # id(entity) -> (duvar arkası mı, son kontrol zamanı)
+occlusion_cursor = 0               # pahalı ray testlerini bölümlere yay
+OCCLUSION_RAY_BUDGET = 10          # her görüş taramasında en fazla 10 ray testi
+# id(entity) -> (entity, önceki visible değeri)
+view_culling_hidden = {}
+# 10 saniyeden uzun süre görüş dışında kalanlar render dışına alınır;
+# Entity referansı ve önceki enabled durumu bellekte tutulur; model nesnesi korunur.
+view_culling_unloaded = {}  # id(entity) -> (entity, was_enabled)
+VIEW_UNLOAD_DELAY = 10.0
 
 
 def _is_alive_entity(entity):
@@ -1950,22 +2421,32 @@ def _is_alive_entity(entity):
 
 
 def restore_view_culled_entities():
-    """Görüş alanı nedeniyle gizlenen nesneleri geri getir."""
-    global view_culling_hidden
-    for entity in list(view_culling_hidden.values()):
+    """Gizlenen/önbelleğe alınan modelleri önceki görünürlükleriyle geri yükle."""
+    global view_culling_hidden, view_culling_unloaded
+    for eid, (entity, was_enabled) in list(view_culling_unloaded.items()):
         if _is_alive_entity(entity):
             try:
-                entity.visible = True
+                entity.enabled = was_enabled
+            except Exception:
+                pass
+    view_culling_unloaded.clear()
+    occlusion_cache.clear()
+    for entity, was_visible in list(view_culling_hidden.values()):
+        if _is_alive_entity(entity):
+            try:
+                entity.visible = was_visible
             except Exception:
                 pass
     view_culling_hidden.clear()
 
 
 def update_view_culling(force=False):
-    """Camera-facing render culling; hides behind/off-view scenery, never destroys it."""
-    global view_culling_timer
-    if not view_culling_enabled or not upscaler_enabled or settings_open or current_ch is None:
-        if view_culling_hidden:
+    """Görüş konisi + mesafe/LOD + sınırlı duvar arkası testi."""
+    global view_culling_timer, occlusion_cursor
+    # Görüş/LOD optimizasyonu ölçekleyiciden bağımsızdır; düşük profillerde devam eder.
+    low_mid_profile = (upscaler_profile in ('Performans', 'Dengeli')) or auto_perf_active
+    if not view_culling_enabled or not low_mid_profile or settings_open or current_ch is None:
+        if view_culling_hidden or view_culling_unloaded:
             restore_view_culled_entities()
         return
 
@@ -1975,7 +2456,6 @@ def update_view_culling(force=False):
     view_culling_timer = 0.0
 
     try:
-        # Use horizontal camera direction so looking up/down does not make the ground vanish.
         forward = Vec3(camera.forward.x, 0, camera.forward.z)
         if forward.length() < 0.0001:
             forward = Vec3(player.forward.x, 0, player.forward.z)
@@ -1983,63 +2463,165 @@ def update_view_culling(force=False):
             return
         forward = forward.normalized()
         cam_pos = Vec3(camera.world_position.x, 0, camera.world_position.z)
-        # 0.12 means a broad forward cone. Anything behind the player is hidden,
-        # while near-field floor/platform pieces are preserved to avoid visible holes.
-        facing_dot_limit = 0.12
-        max_render_distance = 78.0
-        near_keep_distance = 4.5
 
-        # No mesh deletion / destruction: hidden items remain interactive and can reappear.
-        for entity in list(getattr(current_ch, 'ents', [])):
+        # Histerezis ve profil bazlı görüş uzaklığı.
+        if auto_perf_active or upscaler_profile == 'Performans':
+            max_render_distance, restore_distance = 40.0, 46.0
+            lod_hide_distance, lod_restore_distance = 23.0, 19.0
+        elif upscaler_profile == 'Dengeli':
+            max_render_distance, restore_distance = 54.0, 60.0
+            lod_hide_distance, lod_restore_distance = 31.0, 27.0
+        else:
+            max_render_distance, restore_distance = 72.0, 78.0
+            lod_hide_distance, lod_restore_distance = 43.0, 39.0
+        near_keep_distance = 5.5
+        hide_dot_limit = 0.02
+        restore_dot_limit = -0.10
+        now_mono = _time.monotonic()
+        ray_budget = OCCLUSION_RAY_BUDGET
+        entities = list(getattr(current_ch, 'ents', []))
+        if entities:
+            start_idx = occlusion_cursor % len(entities)
+            entities = entities[start_idx:] + entities[:start_idx]
+
+        for entity in entities:
             if not _is_alive_entity(entity):
                 view_culling_hidden.pop(id(entity), None)
                 continue
 
             eid = id(entity)
             try:
-                # Very large sky dome and explicitly excluded entities should never be culled.
                 if getattr(entity, '_kk_no_view_cull', False):
                     if eid in view_culling_hidden:
-                        entity.visible = True
+                        entity.visible = view_culling_hidden[eid][1]
                         view_culling_hidden.pop(eid, None)
                     continue
 
                 scale = entity.scale
                 try:
-                    scale_x = max(abs(float(scale.x)), abs(float(scale.y)), abs(float(scale.z)))
+                    sx = abs(float(scale.x)); sy = abs(float(scale.y)); sz = abs(float(scale.z))
+                    # Yaklaşık yarıçap: iri ağaç/kaya görüş konisine daha erken girer.
+                    radius = max(sx, sy, sz) * 0.5
+                    largest_scale = max(sx, sy, sz)
                 except Exception:
-                    scale_x = abs(float(scale)) if isinstance(scale, (int, float)) else 1.0
-                # Keep giant sky shells, which surround the entire level.
-                if scale_x > 100:
+                    largest_scale = abs(float(scale)) if isinstance(scale, (int, float)) else 1.0
+                    radius = largest_scale * 0.5
+
+                # Gökyüzü kubbesi ve çok büyük çevre kabukları sabit kalmalı.
+                if largest_scale > 100:
                     if eid in view_culling_hidden:
-                        entity.visible = True
+                        entity.visible = view_culling_hidden[eid][1]
                         view_culling_hidden.pop(eid, None)
                     continue
 
                 pos = entity.world_position
                 delta = Vec3(pos.x - cam_pos.x, 0, pos.z - cam_pos.z)
                 distance = delta.length()
+                hidden_entry = view_culling_hidden.get(eid)
+                unloaded_entry = view_culling_unloaded.get(eid)
+
                 if distance <= near_keep_distance:
                     should_render = True
-                elif distance > max_render_distance:
+                elif hidden_entry is not None:
+                    # Gizli nesneler için daha geniş geri-getirme sınırı kullan.
+                    direction = delta / max(distance, 0.0001)
+                    dot = forward.dot(direction)
+                    should_render = (distance <= restore_distance + radius and
+                                     dot >= restore_dot_limit - min(radius / max(distance, 1.0), 0.25))
+                elif distance > max_render_distance + radius:
                     should_render = False
                 else:
                     direction = delta / max(distance, 0.0001)
-                    should_render = forward.dot(direction) >= facing_dot_limit
+                    dot = forward.dot(direction)
+                    should_render = dot >= hide_dot_limit - min(radius / max(distance, 1.0), 0.35)
+
+                # LOD: uzaktaki küçük dekorları kaldırarak çizim çağrılarını azalt.
+                # Şifre kâğıtları, etkileşimli ve collider taşıyan nesneler bu sınıfa girmez.
+                if should_render and getattr(entity, '_kk_lod_candidate', False):
+                    if hidden_entry is None:
+                        should_render = distance <= lod_hide_distance
+                    else:
+                        should_render = distance <= lod_restore_distance
+
+                # Duvar arkası elemesi: sadece görünür konideki küçük, collider'sız adaylarda
+                # sınırlı sayıda raycast yapılır; sonuç kısa süre cache'lenerek FPS korunur.
+                # Çarpışma duvarları/zeminleri kendileri test edilmez, sadece engel olarak kullanılır.
+                if should_render and getattr(entity, '_kk_occlusion_candidate', False) and distance > 7.0 and distance < max_render_distance:
+                    cache_entry = occlusion_cache.get(eid)
+                    is_stale = (cache_entry is None or now_mono - cache_entry[1] > 0.55)
+                    if is_stale and ray_budget > 0:
+                        ray_budget -= 1
+                        try:
+                            origin = camera.world_position
+                            raw_target = entity.world_position
+                            # Zemine yakın küçük dekorlarda ışının zemine erken çarpıp
+                            # nesneyi yanlışlıkla duvar arkasında sanmasını önlemek için hedefi biraz yükselt.
+                            target_raise = max(0.0, min(1.0, (origin.y - raw_target.y) * 0.55))
+                            target = raw_target + Vec3(0, target_raise, 0)
+                            ray_vec = target - origin
+                            ray_len = ray_vec.length() - max(0.35, radius * 0.35)
+                            occluded = False
+                            if ray_len > 0.25:
+                                hit = raycast(origin, ray_vec.normalized(), distance=ray_len,
+                                              ignore=(player,), debug=False)
+                                occluded = bool(getattr(hit, 'hit', False))
+                            occlusion_cache[eid] = (occluded, now_mono)
+                            cache_entry = occlusion_cache[eid]
+                        except Exception:
+                            # GPU/driver/collider edge case: fail open so geometry is not lost.
+                            occlusion_cache[eid] = (False, now_mono)
+                            cache_entry = occlusion_cache[eid]
+                    if cache_entry is not None and cache_entry[0] and now_mono - cache_entry[1] < 0.8:
+                        should_render = False
 
                 if should_render:
-                    if eid in view_culling_hidden:
-                        # Only restore entities hidden by this routine.
-                        entity.visible = True
+                    # Kamera geri döndü: model referansını önbellekten sahneye yeniden bağla.
+                    if unloaded_entry is not None:
+                        cached_entity, was_enabled = unloaded_entry
+                        if _is_alive_entity(cached_entity):
+                            # Modeli yeniden oluşturmak yerine aynı Entity'yi tekrar etkinleştir.
+                            cached_entity.enabled = was_enabled
+                        view_culling_unloaded.pop(eid, None)
+                    if hidden_entry is not None:
+                        entity.visible = hidden_entry[1]
+                        try:
+                            entity._kk_hidden_since = None
+                        except Exception:
+                            pass
                         view_culling_hidden.pop(eid, None)
                 else:
-                    # Skip entities already intentionally hidden by gameplay.
-                    if eid not in view_culling_hidden and bool(getattr(entity, 'visible', True)):
+                    # Önce görünürlüğü kapat; 10 saniye sonra Entity'yi devre dışı bırak.
+                    # Modeli/entity'yi silme veya model alanını None yapma: dönüşte aynısı açılır.
+                    if hidden_entry is None and bool(getattr(entity, 'visible', True)):
+                        previous_visible = bool(entity.visible)
                         entity.visible = False
-                        view_culling_hidden[eid] = entity
+                        view_culling_hidden[eid] = (entity, previous_visible)
+                        try:
+                            entity._kk_hidden_since = _time.monotonic()
+                        except Exception:
+                            pass
+                    if hidden_entry is not None and eid not in view_culling_unloaded:
+                        hidden_entity, _was_visible = hidden_entry
+                        hidden_since = getattr(hidden_entity, '_kk_hidden_since', None)
+                        if hidden_since is None:
+                            try:
+                                hidden_entity._kk_hidden_since = _time.monotonic()
+                                hidden_since = hidden_entity._kk_hidden_since
+                            except Exception:
+                                hidden_since = _time.monotonic()
+                        if _time.monotonic() - hidden_since >= VIEW_UNLOAD_DELAY:
+                            try:
+                                was_enabled = bool(getattr(hidden_entity, 'enabled', True))
+                                view_culling_unloaded[eid] = (hidden_entity, was_enabled)
+                                hidden_entity.enabled = False
+                            except Exception:
+                                pass
             except Exception:
-                # A nonstandard model must not interrupt gameplay's update loop.
+                # Tek bir özel Entity hata verirse kalan modellerin kontrolü devam etsin.
                 continue
+        if entities:
+            # Her kontrolde başlangıç noktasını değiştir: tüm nesneler sıra ile ray test alabilsin.
+            occlusion_cursor = (occlusion_cursor + max(1, len(entities) // 3)) % len(entities)
     except Exception as cull_error:
         print('[GÖRÜŞ CULLING] Güncelleme atlandı:', cull_error)
 
@@ -2092,10 +2674,18 @@ def load_chapter(n):
     if   n==1: current_ch=Chapter1()
     elif n==2: current_ch=Chapter2()
     elif n==3: current_ch=Chapter3()
-    # Ambient particles change palette with the location: fireflies, castle embers, cave sparks.
+    elif n==4: current_ch=Chapter4()
+    # Şifre notları sadece şato keşif bölümünde görünür.
+    if 'hud' in globals():
+        hud.code_note.enabled = (n == 2)
+        hud.code_note_bg.enabled = (n == 2)
+        if n != 2:
+            hud.code_note.text = ''
+    # Ambient particles change palette with the location: forest, castle, boss arena, lava cave.
     palette = {1: color.rgb32(120, 180, 255),
-               2: color.rgb32(255, 145, 58),
-               3: color.rgb32(255, 85, 28)}[n]
+               2: color.rgb32(255, 190, 100),
+               3: color.rgb32(255, 145, 58),
+               4: color.rgb32(255, 85, 28)}[n]
     for mote, _speed, _phase in ambient_motes:
         mote.color = palette
         mote.position = (player.x + random.uniform(-12, 12),
@@ -2110,21 +2700,124 @@ def load_chapter(n):
     except Exception as visual_setup_error:
         print('[GÖRSEL] Bölüm ayarları uygulanamadı:', visual_setup_error)
 
+def restart_run_after_fall():
+    """Dünyanın altına düşülürse bütün ilerlemeyi temizleyip ormandan yeniden başlat."""
+    global hand_sword, current_ch, view_culling_timer
+    print('[OYUN] Dünya sınırının altına düşüldü; yeni oyun başlatılıyor.')
+    # Açık şifre paneli/diyalog ve eski respawn durumu kapatılır.
+    try:
+        dlg.enabled = False
+        dlg._show_id += 1
+    except Exception:
+        pass
+    g.chapter = 1
+    g.hp = 100
+    g.has_sword = False
+    g.has_key = False
+    g.dlg_open = False
+    g.enemy_dead = False
+    g.atk_cd = 0.0
+    g.respawn = False
+    if hand_sword is not None:
+        try: destroy(hand_sword)
+        except Exception: pass
+        hand_sword = None
+    try:
+        hud.code_note.text = ''
+        hud.code_note.enabled = False
+        hud.code_note_bg.enabled = False
+        hud.set_boss(None)
+        hud.set_hint('')
+        hud.refresh()
+    except Exception:
+        pass
+    restore_view_culled_entities()
+    view_culling_timer = 0.0
+    load_chapter(1)
+    player.position = Vec3(0, 2.5, 0)
+    player.rotation = Vec3(0, 0, 0)
+    try:
+        player.air_time = 0
+        player.grounded = True
+        player.jumping = False
+        player.velocity = Vec3(0, 0, 0)
+    except Exception:
+        pass
+    hud.announce('Dünya sınırının dışına düştün. Macera baştan başladı!', 3.5)
+
+def update_auto_performance():
+    """FPS 25 altına 1.6 sn düşerse Performans profili + düşük grafik kalitesi uygula."""
+    global auto_perf_low_time, auto_perf_warmup, auto_perf_fps_smooth
+    global auto_perf_active, auto_perf_has_triggered, auto_saved_graphics_quality
+    if not AUTO_PERFORMANCE_ENABLED or settings_open:
+        return
+    dt = max(float(time.dt), 0.0001)
+    instant_fps = min(300.0, 1.0 / dt)
+    # Exponential smoothing avoids switching due to one short loading spike.
+    alpha = min(1.0, dt * 1.8)
+    auto_perf_fps_smooth += (instant_fps - auto_perf_fps_smooth) * alpha
+    auto_perf_warmup += dt
+    if auto_perf_warmup < 3.0 or auto_perf_has_triggered:
+        return
+    if auto_perf_fps_smooth < 25.0:
+        auto_perf_low_time += dt
+    else:
+        auto_perf_low_time = max(0.0, auto_perf_low_time - dt * 0.75)
+    if auto_perf_low_time < 1.6:
+        return
+
+    auto_perf_has_triggered = True
+    auto_perf_active = True
+    auto_saved_graphics_quality = globals().get('graphics_quality', 'Yüksek')
+    try:
+        if upscaler_profile != 'Performans':
+            apply_upscaler_profile('Performans', automatic=True)
+        else:
+            auto_perf_active = True
+        if globals().get('graphics_quality') != 'Düşük':
+            apply_graphics_quality('Düşük')
+        # Culling/LOD remains useful even if the optional upscale shader is unavailable.
+        update_view_culling(force=True)
+        msg = 'FPS 25 altına düştü: otomatik Performans profili etkin.'
+        if not RT_PIPELINE_AVAILABLE:
+            msg = 'FPS düşük: Performans LOD ve grafik optimizasyonları etkin. Ölçekleme hattı bu sistemde kullanılamıyor.'
+        try:
+            hud.announce(msg, 4.5)
+        except Exception:
+            pass
+        print('[ADAPTİF FPS] Performans profiline geçildi. Ortalama FPS:', round(auto_perf_fps_smooth, 1))
+    except Exception as auto_error:
+        print('[ADAPTİF FPS] Otomatik profil uygulanamadı:', auto_error)
+
+
 def update():
     global menu_time
+    # Harita altına düşmek her bölümde tam yeniden başlatır: boss, anahtar, kılıç
+    # ve şifre notları sıfırlanır; yeni koşu her zaman ormanda başlar.
+    if 'player' in globals() and player.y < -14:
+        restart_run_after_fall()
+        return
     # Ek güvenlik: ayarlar açıkken oyun tarafındaki global güncelleme de tamamen durur.
     if settings_open:
         return
+    update_auto_performance()
     # Bölüm Entity'lerinin update()'i Ursina tarafından zaten çağrılır.
     g.atk_cd = max(0.0, g.atk_cd - time.dt)
     update_warm_light_uniforms()
     update_reflection_camera()
     update_raytrace_uniforms()
     update_view_culling()
-    for mote, speed, phase in ambient_motes:
+    particle_limit = 10 if (auto_perf_active or upscaler_profile == 'Performans') else (20 if upscaler_profile == 'Dengeli' else len(ambient_motes))
+    for mote_index, (mote, speed, phase) in enumerate(ambient_motes):
+        # Arka plan közleri performans profillerinde çizilmez; tekrar kalite yükselince geri açılır.
+        should_enable_mote = mote_index < particle_limit
+        if mote.enabled != should_enable_mote:
+            mote.enabled = should_enable_mote
+        if not should_enable_mote:
+            continue
         mote.y += time.dt * speed
-        mote.x += math.sin(time.time() * 0.7 + phase) * time.dt * 0.12
-        mote.scale = 0.018 + (0.012 * (0.5 + 0.5 * math.sin(time.time() * 1.8 + phase)))
+        mote.x += math.sin(_time.monotonic() * 0.7 + phase) * time.dt * 0.12
+        mote.scale = 0.018 + (0.012 * (0.5 + 0.5 * math.sin(_time.monotonic() * 1.8 + phase)))
         if mote.y > player.y + 7:
             mote.y = player.y - random.uniform(1.0, 3.0)
         if abs(mote.x - player.x) > 18 or abs(mote.z - player.z) > 18:
@@ -2154,9 +2847,16 @@ def settings_input(key):
 settings_pause_handler = Entity(ignore_paused=True, input=settings_input)
 
 def input(key):
+    # Şato şifre paneli önce girdileri yakalar; sonra normal oyun girdileri devam eder.
+    if not settings_open and current_ch and hasattr(current_ch, 'handle_input'):
+        if current_ch.handle_input(key):
+            return
     # Enter yalnızca ekrandaki mevcut altyazıyı atlar.
     if key in ('enter', 'numpad enter') and dlg.enabled and not settings_open:
         dlg.hide()
+        return
+    if key == 'e' and not settings_open and not g.dlg_open and current_ch and hasattr(current_ch, 'interact'):
+        current_ch.interact()
         return
     if key == 'left mouse down' and not settings_open:
         player_attack()
